@@ -1,0 +1,101 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: "AWS::Serverless-2016-10-31"
+Description: An AWS Serverless Specification template for a serverless application.
+Parameters:
+  FrontendBucketDomainName:
+    Type: String
+    Description: The regional domain name of the S3 bucket
+  FrontendBucketOAI:
+    Type: String
+    Description: The CloudFront Origin Access Identity
+  AllowedIP:
+    Type: String
+    Description: IP address CIDR allowed to access CloudFront distribution.
+    Default: "0.0.0.0/32"
+
+Resources:
+  CloudFrontDistribution:
+    Type: "AWS::CloudFront::Distribution"
+    Properties:
+      DistributionConfig:
+        WebACLId: !GetAtt WafACL.Arn
+        Origins:
+          - DomainName: !Ref FrontendBucketDomainName
+            Id: Frontend
+            S3OriginConfig:
+              OriginAccessIdentity: !Join
+                - ""
+                - - origin-access-identity/cloudfront/
+                  - !Ref FrontendBucketOAI
+        Enabled: true
+        DefaultRootObject: index.html
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - GET
+            - HEAD
+          TargetOriginId: Frontend
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+          ViewerProtocolPolicy: redirect-to-https
+  WafACL:
+    Type: "AWS::WAFv2::WebACL"
+    Properties:
+      DefaultAction:
+        Block: {}
+      Name: WafAclName
+      Scope: CLOUDFRONT
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: WafAclMetric
+      Rules:
+        - Name: AllowSpecificIP
+          Priority: 0
+          Statement:
+            RuleGroupReferenceStatement:
+              Arn: !GetAtt WafRule.Arn
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AllowSpecificIP
+  WafIPSet:
+    Type: "AWS::WAFv2::IPSet"
+    Properties:
+      Name: GlobalWafIPSet
+      IPAddressVersion: IPV4
+      Scope: CLOUDFRONT
+      Addresses:
+        - !Ref AllowedIP
+  WafRule:
+    Type: "AWS::WAFv2::RuleGroup"
+    Properties:
+      Name: GlobalWafRule
+      Scope: CLOUDFRONT
+      Capacity: 100
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: WafRuleMetric
+      Rules:
+        - Name: AllowSpecificIP
+          Priority: 0
+          Action:
+            Allow: {}
+          Statement:
+            IPSetReferenceStatement:
+              Arn: !GetAtt WafIPSet.Arn
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AllowSpecificIP
+Outputs:
+  CloudFrontDistributionUrl:
+    Description: The CloudFront Distribution URL
+    Value: !Sub "https://${CloudFrontDistribution.DomainName}"
+  CloudFrontDistributionID:
+    Description: The CloudFront Distribution ID
+    Value: !Ref CloudFrontDistribution

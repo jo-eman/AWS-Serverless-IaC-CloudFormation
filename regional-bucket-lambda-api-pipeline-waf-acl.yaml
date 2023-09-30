@@ -1,0 +1,439 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: "AWS::Serverless-2016-10-31"
+Description: An AWS Serverless Specification template for a serverless application.
+Parameters:
+  WebBucketName:
+    Type: String
+    Description: Name of the web bucket.
+    Default: "webbucket-helloworld"
+  AllowedIP:
+    Type: String
+    Description: IP address CIDR allowed to access CloudFront distribution.
+    Default: "0.0.0.0/32"
+  RepoName:
+    Type: String
+    Description: Name for CodeCommit repository
+    Default: "Serverless-Image-Gallery-repo"
+  CodeBucketName:
+    Type: String
+    Description: Name of the bucket used to push the code to the repo
+    Default: "serverless-image-gallery-codebucket"
+  PipelineProjectName:
+    Type: String
+    Description: Name of the Pipeline project
+    Default: "Serverless-Image-Gallery-project"
+  Region:
+    Type: String
+    Description: The AWS region to deploy resources in
+  AwsCliLambdaLayerZip:
+    Type: String
+    Description: The zip of the AWS CLI Lambda Layer in the codebucket
+  GitName:
+    Type: String
+    Description: The git name for the initial commit
+    Default: serverless-image-gallery
+  GitEmail:
+    Description: "The git email for the initial commit"
+    Type: String
+    Default: serverless@image.gallery
+Resources:
+  FrontendBucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: !Ref WebBucketName
+  FrontendBucketOAI:
+    Type: "AWS::CloudFront::CloudFrontOriginAccessIdentity"
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: OAI used for S3 bucket access.
+  FrontendBucketPolicy:
+    Type: "AWS::S3::BucketPolicy"
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              CanonicalUser: !GetAtt FrontendBucketOAI.S3CanonicalUserId
+            Action: "s3:GetObject"
+            Resource: !Sub "${FrontendBucket.Arn}/*"
+  RegionalWafIPSet:
+    Type: "AWS::WAFv2::IPSet"
+    Properties:
+      Name: RegionalWafIPSet
+      IPAddressVersion: IPV4
+      Scope: REGIONAL
+      Addresses:
+        - !Ref AllowedIP
+  RegionalWafRule:
+    Type: "AWS::WAFv2::RuleGroup"
+    Properties:
+      Name: RegionalWafRule
+      Scope: REGIONAL
+      Capacity: 100
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: RegionalWafRuleMetric
+      Rules:
+        - Name: AllowSpecificIP
+          Priority: 0
+          Action:
+            Allow: {}
+          Statement:
+            IPSetReferenceStatement:
+              Arn: !GetAtt RegionalWafIPSet.Arn
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AllowSpecificIP
+  RegionalWafACL:
+    Type: "AWS::WAFv2::WebACL"
+    Properties:
+      DefaultAction:
+        Block: {}
+      Name: RegionalWafAclName
+      Scope: REGIONAL
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: RegionalWafAclMetric
+      Rules:
+        - Name: AllowSpecificIP
+          Priority: 0
+          Statement:
+            RuleGroupReferenceStatement:
+              Arn: !GetAtt RegionalWafRule.Arn
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AllowSpecificIP
+  LambdaExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: LambdaS3AccessPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - "s3:ListBucket"
+                Resource:
+                  - !GetAtt FrontendBucket.Arn
+              - Effect: Allow
+                Action:
+                  - "s3:GetObject"
+                Resource:
+                  - !Sub "arn:aws:s3:::${CodeBucketName}/*"
+  MyApi:
+    Type: "AWS::Serverless::Api"
+    Properties:
+      StageName: Prod
+      DefinitionBody:
+        swagger: "2.0"
+        info:
+          title: MyApi
+        paths:
+          /listImages:
+            get:
+              x-amazon-apigateway-integration:
+                uri:
+                  Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ListImagesLambdaFunction.Arn}/invocations
+                responses: {}
+                httpMethod: POST
+                type: aws_proxy
+  ListImagesLambdaFunction:
+    Type: "AWS::Serverless::Function"
+    Properties:
+      CodeUri:
+        Bucket: !Ref CodeBucketName
+        Key: listimageslambda.zip
+      Handler: index.handler
+      Runtime: nodejs18.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref WebBucketName
+          BUCKET_REGION: !Ref Region
+      Events:
+        ListImages:
+          Type: Api
+          Properties:
+            RestApiId: !Ref MyApi
+            Path: /listImages
+            Method: GET
+  ApiGatewayWebACLAssociation:
+    Type: "AWS::WAFv2::WebACLAssociation"
+    DependsOn: MyApi
+    Properties:
+      WebACLArn: !GetAtt RegionalWafACL.Arn
+      ResourceArn: !Sub
+        - "arn:aws:apigateway:${AWS::Region}::/restapis/${MyApi}/stages/${Stage}"
+        - Stage: !Ref MyApi.Stage
+
+  MyCodeCommit:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: !Ref RepoName
+
+  MyCodeBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Ref PipelineProjectName
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        Type: LINUX_CONTAINER
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: WebBucketName
+            Value: !Ref WebBucketName
+            Type: PLAINTEXT # or SECRETS_MANAGER if it's a secret
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              runtime-versions:
+                nodejs: 12
+            post_build:
+              commands:
+                - aws s3 sync ./frontend s3://${WebBucketName}/
+
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: CodeBuildServiceRolePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: "*"
+                Resource: "*"
+        - PolicyName: S3SyncAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "s3:PutObject"
+                  - "s3:PutObjectAcl"
+                  - "s3:GetObject"
+                  - "s3:ListBucket"
+                  - "s3:DeleteObject"
+                Resource:
+                  - !Sub "arn:aws:s3:::${FrontendBucket}/*"
+                  - !Sub "arn:aws:s3:::${FrontendBucket}"
+
+  MyPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RoleArn: !GetAtt PipelineRole.Arn
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: "1"
+                Provider: CodeCommit
+              OutputArtifacts:
+                - Name: SourceOutput
+              Configuration:
+                RepositoryName: !Ref RepoName
+                BranchName: master
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: BuildAction
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: "1"
+                Provider: CodeBuild
+              InputArtifacts:
+                - Name: SourceOutput
+              Configuration:
+                ProjectName: !Ref MyCodeBuild
+              RunOrder: 1
+      ArtifactStore:
+        Type: S3
+        Location: !Ref CodeBucketName
+
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: CodePipelineRolePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: "*"
+                Resource: "*"
+  CodepushLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaS3CodeBucketAccessPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - "s3:GetObject"
+                  - "s3:ListBucket"
+                  - "s3:PutObject"
+                  - "codecommit:GitPull"
+                  - "codecommit:GitPush"
+                Resource:
+                  - !Sub "arn:aws:s3:::${CodeBucketName}"
+                  - !Sub "arn:aws:s3:::${CodeBucketName}/*"
+                  - !GetAtt MyCodeCommit.Arn
+  GitLayer:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location:
+        ApplicationId: arn:aws:serverlessrepo:us-east-1:622653865277:applications/Git-Layer
+        SemanticVersion: 2.28.0
+  AwsCLILambdaLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      CompatibleRuntimes:
+        - python3.8
+      Content:
+        S3Bucket: !Ref CodeBucketName
+        S3Key: !Ref AwsCliLambdaLayerZip
+      LayerName: AwsCliLambdaLayerName
+
+  PushToCodeCommitLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: index.handler
+      Runtime: python3.8
+      Role: !GetAtt CodepushLambdaExecutionRole.Arn
+      Layers:
+        - !GetAtt GitLayer.Outputs.LayerArn
+        - !Ref AwsCLILambdaLayer
+      InlineCode: |
+        import os
+        import subprocess
+        import sys
+
+        def handler(event, context):
+            os.environ['HOME'] = "/tmp"
+            os.chdir("/tmp")
+
+            # Use the AWS CLI credential-helper for Git
+            os.system('git config --global credential.helper "/opt/aws codecommit credential-helper $@"')
+            os.system('git config --global credential.UseHttpPath true')
+
+            repo_url = 'https://git-codecommit.' + os.environ['Region'] + '.amazonaws.com/v1/repos/' + os.environ['RepoName']
+
+            subprocess.check_call(['git', 'clone', repo_url])
+            # Change into the cloned repository
+            os.chdir(os.environ['RepoName'])
+            # Configure Git with a user name and email from the environment variables
+            subprocess.call(['git', 'config', 'user.email', os.environ['GIT_EMAIL']])
+            subprocess.call(['git', 'config', 'user.name', os.environ['GIT_NAME']])
+            # Check if the repository is empty
+            result = subprocess.run(['git', 'ls-remote', '--exit-code'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            
+            if result.returncode != 0:
+                # If repository is empty, perform git operations
+                # Ensure '/src/' directory in S3 bucket is specified
+                subprocess.check_call(['/opt/aws', 's3', 'sync', 's3://' + os.environ['CodeBucket'] + '/src/', '.'])
+                subprocess.call(['git', 'add', '.'])
+                subprocess.call(['git', 'commit', '-m', '"New code from S3"'])
+                subprocess.call(['git', 'push', 'origin', 'master'])
+
+                return {
+                    'statusCode': 200,
+                    'body': 'Code has been pushed to the repository.'
+                }
+            else:
+                return {
+                    'statusCode': 200,
+                    'body': 'The repository is not empty. Not pushing.'
+                }
+
+      Timeout: 300 # Timeout to 5 minutes
+      Environment:
+        Variables:
+          CodeBucket: !Ref CodeBucketName
+          Region: !Ref Region
+          RepoName: !Ref RepoName
+          GIT_NAME: !Ref GitName
+          GIT_EMAIL: !Ref GitEmail
+
+Outputs:
+  FrontendBucketDomainName:
+    Description: The regional domain name of the S3 bucket
+    Value: !GetAtt FrontendBucket.RegionalDomainName
+  FrontendBucketOAI:
+    Description: The CloudFront Origin Access Identity
+    Value: !Ref FrontendBucketOAI
+  PushToCodeCommitLambda:
+    Description: "The ARN of the lambda function used to push code to CodeCommit"
+    Value: !GetAtt PushToCodeCommitLambda.Arn
+  ListImagesApi:
+    Description: "API Gateway endpoint URL for List Images function"
+    Value: !Sub "https://${MyApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/listImages"
+  RepoURL:
+    Description: The HTTPS URL of the CodeCommit repository
+    Value: !Sub "https://git-codecommit.${AWS::Region}.amazonaws.com/v1/repos/${RepoName}"

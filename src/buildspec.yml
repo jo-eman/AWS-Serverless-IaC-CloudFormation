@@ -1,0 +1,62 @@
+version: 0.2
+
+cache:
+  paths:
+    - "putlambda/node_modules/**/*"
+    - "getlambda/node_modules/**/*"
+    - "listlambda/node_modules/**/*"
+phases:
+  install:
+    runtime-versions:
+      nodejs: latest
+  pre_build:
+    commands:
+      - echo Check which directories have changed and set environment variables
+      - |
+        if git diff --name-only HEAD^ HEAD | grep -q "^putlambda"; then
+          export BUILD_PUTLAMBDA=true
+        fi
+      - |
+        if git diff --name-only HEAD^ HEAD | grep -q "^getlambda"; then
+          export BUILD_GETLAMBDA=true
+        fi
+      - |
+        if git diff --name-only HEAD^ HEAD | grep -q "^listlambda"; then
+          export BUILD_LISTLAMBDA=true
+        fi
+      - |
+        if git diff --name-only HEAD^ HEAD | grep -q "^frontend"; then
+          export BUILD_FRONTEND=true
+        fi
+  build:
+    commands:
+      - |
+        if [ "$BUILD_PUTLAMBDA" = true ]; then
+          echo Build phase for putlambda...
+          cd putlambda
+          zip -r putlambda.zip *
+          aws lambda update-function-code --function-name 2806-putObjToS3 --zip-file fileb://putlambda.zip
+          cd ..
+        fi
+      - |
+        if [ "$BUILD_GETLAMBDA" = true ]; then
+          echo Build phase for getlambda...
+          cd getlambda
+          zip -r getlambda.zip *
+          aws lambda update-function-code --function-name 2106 --zip-file fileb://getlambda.zip
+          cd ..
+        fi
+      - |
+        if [ "$BUILD_LISTLAMBDA" = true ]; then
+          echo Build phase for listlambda...
+          cd listlambda
+          zip -r listlambda.zip *
+          aws lambda update-function-code --function-name 2706 --zip-file fileb://listlambda.zip
+          cd ..
+        fi
+      - |
+        if [ "$BUILD_FRONTEND" = true ]; then
+          echo Build phase for frontend...
+          aws s3 sync ./frontend s3://2906-frontend
+          aws cloudfront create-invalidation --distribution-id E281SPO14D2Q4O --paths "/*"
+        fi
