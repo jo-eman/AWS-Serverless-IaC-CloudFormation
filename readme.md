@@ -1,5 +1,7 @@
 ## Serverless Image Gallery + Infrastructure as Code + Pipeline
 
+Disclaimer: This project was created for educational purposes while learning AWS from scratch. I acknowledge that it contains many areas of improvement and not-best-practices. I display it here to demonstrate some knowlege in AWS, serverless architecture and IaC
+
 This project contains an AWS Serverless Application/CloudFormation template that deploys a serverless image gallery application in AWS behind CloudFront CDN and a WAF that restricts access to only allow 1 ip.
 
 - Regional template creates a stack with necessary aws resources such as lambdas, lambdalayers, buckets, API, IAM policies, WAF
